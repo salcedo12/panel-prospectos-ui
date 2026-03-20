@@ -1,3 +1,4 @@
+
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
@@ -5,6 +6,7 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const XLSX = require("xlsx");
+const xml2js = require("xml2js");
 
 const app = express();
 app.use(cors());
@@ -14,6 +16,7 @@ const PORT = process.env.PORT || 3001;
 const MANAGE = process.env.SMARTHOME_MANAGE_BASE;
 const API = process.env.SMARTHOME_API_BASE;
 const CLIENT = process.env.SMARTHOME_CLIENT || "ac00771c";
+
 
 function cleanSpaces(s) {
   return (s ?? "").toString().replace(/\s+/g, " ").trim();
@@ -27,16 +30,25 @@ function norm(s) {
 }
 
 async function fetchJson(url, options = {}) {
-  const res = await fetch(url, options);
-  const text = await res.text();
-  let data;
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = text;
+    const res = await fetch(url, options);
+    const text = await res.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    if (!res.ok) {
+      console.error("Fetch error URL:", url);
+      console.error("Response text:", text);
+      throw new Error(`HTTP ${res.status}`);
+    }
+    return data;
+  } catch (err) {
+    console.error("fetchJson error:", err.message);
+    throw err;
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${String(text).slice(0, 300)}`);
-  return data;
 }
 
 function headersBI() {
@@ -47,25 +59,10 @@ function headersAPI() {
   return { Authorization: process.env.SMART_HOME_API_KEY };
 }
 
-/**
- * Mapeo flexible: cualquier variante del nombre del proyecto -> projectCode
- * (se compara usando norm())
- */
 const PROJECT_CODE_BY_NAME = {
   [norm("Cañon de Arizona Bungalow Luxury Living Club")]: "17c89d4e",
   [norm("Ciudad Country Laguna Mar Bungalow Coliving Club")]: "48c9266a",
   [norm("Rio Claro Luxury Living Club")]: "5ad1b166",
-
-  [norm("Cañon de Arizona")]: "17c89d4e",
-  [norm("Cañon de arizona")]: "17c89d4e",
-  [norm("Canon de Arizona")]: "17c89d4e",
-
-  [norm("Ciudad Country Laguna Mar")]: "48c9266a",
-  [norm("Laguna Mar")]: "48c9266a",
-  [norm("Laguna mar")]: "48c9266a",
-
-  [norm("Rio Claro")]: "5ad1b166",
-  [norm("Río Claro")]: "5ad1b166",
 };
 
 function getProjectCode(projectName) {
@@ -88,96 +85,185 @@ const SHEET_BY_ADVISOR = {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+function getDatesBetween(start, end) {
+  const dates = [];
+  const current = new Date(start);
+  const last = new Date(end);
+
+  while (current <= last) {
+    const yyyy = current.getFullYear();
+    const mm = String(current.getMonth() + 1).padStart(2, "0");
+    const dd = String(current.getDate()).padStart(2, "0");
+    dates.push(`${yyyy}-${mm}-${dd}`);
+    current.setDate(current.getDate() + 1);
+  }
+  return dates;
+}
+
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-/**
- * GET /api/prospects
- * Query:
- *  - createdDate=YYYY-MM-DD (requerido)
- *  - advisor=texto (opcional, filtra por nombre asesor)
- *  - project=texto (opcional, filtra por proyecto)
- *  - page, records (opcional)
- */
+
+const { XMLParser } = require("fast-xml-parser");
+
+app.get("/api/prospects/:prospectId/events-enriched", async (req, res) => {
+  try {
+    const { prospectId } = req.params;
+    const projectCode = req.query.projectCode;
+    if (!projectCode) return res.status(400).json({ error: "projectCode requerido" });
+
+    const url = `${API}/api/v1/getProspectEvents/${CLIENT}/${projectCode}/${prospectId}/`;
+    const eventsRaw = await fetchJson(url, { headers: headersAPI() });
+    const events = Array.isArray(eventsRaw?.events) ? eventsRaw.events : [];
+
+    const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
+
+   const enriched = await Promise.all(events.map(async (e) => {
+  let asesor = `User ${e.userId || ""}`;
+  if (e.userId) {
+    try {
+      const userUrl = `${API}/api/v1/getUser/${CLIENT}/${e.userId}`;
+      const userRes = await fetch(userUrl, { headers: headersAPI() });
+      const text = await userRes.text();
+
+      if (text.trim().startsWith("<")) {
+        const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
+        const parsed = parser.parse(text);
+
+        // Buscamos el User dinámicamente
+        let user = parsed?.V1Control?.UserResponse?.users?.User;
+        if (Array.isArray(user)) user = user[0]; // si viene como array
+        if (user && (user.firstName || user.lastName)) {
+          asesor = `${user.firstName || ""} ${user.lastName || ""}`.trim();
+        }
+      } else {
+        const data = JSON.parse(text);
+        if (data?.firstName || data?.lastName) {
+          asesor = `${data.firstName || ""} ${data.lastName || ""}`.trim();
+        }
+      }
+
+    } catch (err) {
+      console.error("Error fetching user:", err.message);
+    }
+  }
+
+  return {
+    fecha: e.date || e.startTime || "",
+    asesor,
+    nota: e.content || "",
+    raw: e,
+  };
+}));
+
+    res.json(enriched);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ======================
+// User info endpoint
+// ======================
+app.get("/api/user/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const url = `${API}/api/v1/getUser/${CLIENT}/${userId}`;
+    const response = await fetch(url, { headers: headersAPI() });
+    const text = await response.text();
+
+    let name = `User ${userId}`;
+    if (text.trim().startsWith("<")) {
+      const parser = new xml2js.Parser({ explicitArray: false });
+      const result = await parser.parseStringPromise(text);
+      const user = result?.['V1Control.UserResponse']?.users?.['V1Control.UserResponse.User'];
+      if (user) name = `${user.firstName || ""} ${user.lastName || ""}`.trim();
+    } else {
+      const data = JSON.parse(text);
+      if (data?.firstName || data?.lastName) name = `${data.firstName || ""} ${data.lastName || ""}`.trim();
+    }
+
+    res.json({ name });
+  } catch (err) {
+    console.error("Error fetching user:", err);
+    res.json({ name: `User ${req.params.userId}` });
+  }
+});
+
+// ======================
+// Prospects endpoint
+// ======================
 app.get("/api/prospects", async (req, res) => {
   try {
-    const createdDate = req.query.createdDate;
-    const advisor = req.query.advisor;
-    const project = req.query.project; // <-- NUEVO
-    const page = req.query.page || 1;
-    const records = req.query.records || 50;
-
-    if (!createdDate) return res.status(400).json({ error: "createdDate requerido YYYY-MM-DD" });
+    const { createdDate, untilDate, advisor, project, page = 1, records = 20 } = req.query;
+    if (!createdDate) return res.status(400).json({ error: "createdDate requerido" });
 
     const encrypted = process.env.SMART_HOME_ENCRYPTED;
     if (!encrypted) return res.status(500).json({ error: "SMART_HOME_ENCRYPTED no configurado" });
 
     const safeEncrypted = encodeURIComponent(encrypted);
-    const url = `${MANAGE}/api/bi/getProspectDetail/${safeEncrypted}/?page=${page}&records=${records}&createdDate=${createdDate}`;
+    const dates = untilDate ? getDatesBetween(createdDate, untilDate) : [createdDate];
 
-    const data = await fetchJson(url, { headers: headersBI() });
-    const list = Array.isArray(data?.records) ? data.records : [];
+    let allRecords = [];
 
-    const normalized = list
+    for (const d of dates) {
+      const url = `${MANAGE}/api/bi/getProspectDetail/${safeEncrypted}/?page=1&records=500&createdDate=${d}`;
+      console.log("Fetching SMART HOME BI:", url);
+      const data = await fetchJson(url, { headers: headersBI() });
+      if (Array.isArray(data?.records)) allRecords.push(...data.records);
+    }
+
+    let filtered = allRecords
       .map((r) => {
         const proyectoNombre = cleanSpaces(r.Proyecto || "");
-        const projectCode = getProjectCode(proyectoNombre);
-
-        const telefono = cleanSpaces(r.Celular || r.Telefono || "");
-        const asesor = cleanSpaces(r.Asesor || "");
-
         return {
           prospectId: r.ProspectId,
-          proyectoNombre,
-          projectCode,
-          asesor,
+          cliente: cleanSpaces(r.Nombre_del_Cliente || ""),
+          telefono: cleanSpaces(r.Celular || r.Telefono || ""),
           probabilidad: r.Probabilidad ?? "",
-          telefono,
-          fechaCreacion: r.Fecha_de_Creacion || "",
-          raw: r,
+          asesor: cleanSpaces(r.Asesor || ""),
+          proyectoNombre,
+          projectCode: getProjectCode(proyectoNombre),
+          fechaCreacion: r.Fecha_de_Creacion,
+          fuenteUbicacionCliente: cleanSpaces(r.Fuente_de_Ubicacion_Cliente || ""),
+          fuenteUbicacionProspecto: cleanSpaces(r.Fuente_de_Ubicacion_Prospecto || "")
         };
       })
       .filter((x) => x.prospectId);
 
-    // 1) filtro por advisor (como ya lo tenías)
-    let filtered = advisor
-      ? normalized.filter((x) => norm(x.asesor).includes(norm(advisor)))
-      : normalized;
+    if (advisor) filtered = filtered.filter((x) => norm(x.asesor) === norm(advisor));
+    if (project) filtered = filtered.filter((x) => norm(x.proyectoNombre).includes(norm(project)));
 
-    // 2) filtro por project (NUEVO)
-    // - si project es vacío o "todos", no filtra
-    const projectNorm = norm(project);
-    const ignoreProject =
-      !projectNorm || projectNorm === "todos" || projectNorm === "todas" || projectNorm === "all";
+    const pageNum = parseInt(page);
+    const limit = parseInt(records);
+    const start = (pageNum - 1) * limit;
+    const end = start + limit;
+    const paginated = filtered.slice(start, end);
 
-    if (!ignoreProject) {
-      const codeWanted = getProjectCode(project);
-
-      if (codeWanted) {
-        // Filtra por projectCode cuando lo podemos mapear (recomendado)
-        filtered = filtered.filter((x) => x.projectCode === codeWanted);
-      } else {
-        // Si no hay mapeo, intenta filtrar por nombre normalizado (fallback)
-        filtered = filtered.filter((x) => norm(x.proyectoNombre).includes(projectNorm));
-      }
-    }
-
-    res.json({ records: filtered });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    res.json({
+      page: pageNum,
+      totalRecords: filtered.length,
+      totalPages: Math.ceil(filtered.length / limit),
+      records: paginated,
+    });
+  } catch (err) {
+    console.error("ERROR /api/prospects:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
+// ======================
+// Events endpoint (raw)
+// ======================
 app.get("/api/prospects/:prospectId/events", async (req, res) => {
   try {
     const { prospectId } = req.params;
     const projectCode = req.query.projectCode;
-
-    if (!projectCode) return res.status(400).json({ error: "projectCode requerido (ej: 48c9266a)" });
+    if (!projectCode) return res.status(400).json({ error: "projectCode requerido" });
 
     const url = `${API}/api/v1/getProspectEvents/${CLIENT}/${projectCode}/${prospectId}/`;
     const data = await fetchJson(url, { headers: headersAPI() });
-
     res.json(data);
   } catch (e) {
     console.error(e);
@@ -185,13 +271,15 @@ app.get("/api/prospects/:prospectId/events", async (req, res) => {
   }
 });
 
+// ======================
+// CRM upload XLSX
+// ======================
 app.post("/api/crm/upload-xlsx", upload.single("file"), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Falta archivo (field name: file)" });
 
     const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
     const sheetNames = workbook.SheetNames || [];
-
     const result = {};
 
     for (const sheetName of sheetNames) {
@@ -199,7 +287,6 @@ app.post("/api/crm/upload-xlsx", upload.single("file"), (req, res) => {
       if (!ws) continue;
 
       const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-
       const mapped = rows
         .map((r) => ({
           sheet: sheetName,
@@ -218,7 +305,6 @@ app.post("/api/crm/upload-xlsx", upload.single("file"), (req, res) => {
     }
 
     crmSheets = result;
-
     res.json({
       ok: true,
       sheets: sheetNames,
@@ -231,18 +317,16 @@ app.post("/api/crm/upload-xlsx", upload.single("file"), (req, res) => {
   }
 });
 
+// ======================
+// CRM contacts
+// ======================
 app.get("/api/crm/contacts", (req, res) => {
   try {
     const advisor = req.query.advisor;
     if (!advisor) return res.status(400).json({ error: "advisor requerido" });
 
     const sheetKey = SHEET_BY_ADVISOR[norm(advisor)];
-    if (!sheetKey) {
-      return res.status(400).json({
-        error: "No tengo mapeo hoja->asesor para ese nombre",
-        advisor,
-      });
-    }
+    if (!sheetKey) return res.status(400).json({ error: "No tengo mapeo hoja->asesor para ese nombre" });
 
     const data = crmSheets[norm(sheetKey)] || [];
     res.json({ records: data, sheet: sheetKey });
@@ -251,6 +335,7 @@ app.get("/api/crm/contacts", (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`Backend corriendo en http://localhost:${PORT}`);

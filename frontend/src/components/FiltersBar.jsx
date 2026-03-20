@@ -19,7 +19,7 @@ export default function FiltersBar({
             className="border rounded px-3 py-2 bg-white w-full"
           >
             {projects.map((p) => (
-              <option key={p.id} value={p.id}>
+              <option key={p.id} value={p.name}>
                 {p.name}
               </option>
             ))}

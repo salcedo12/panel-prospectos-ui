@@ -1,12 +1,16 @@
 import { useState } from "react";
 import AdvisorsPage from "./pages/AdvisorsPage";
 import AdvisorDetailPage from "./pages/AdvisorDetailPage";
-
 import { advisors } from "./data/advisors";
-import { projects, crmMock } from "./data/mock";
 
 export default function App() {
   const [advisorSel, setAdvisorSel] = useState(null);
+
+  const projects = [
+    { id: "CANON", name: "Cañon de Arizona" },
+    { id: "LAGUNA", name: "Laguna Mar" },
+    { id: "RIO", name: "Rio Claro" },
+  ];
 
   return (
     <div className="min-h-screen bg-gray-100 p-8">
@@ -18,7 +22,6 @@ export default function App() {
         <AdvisorDetailPage
           advisor={advisorSel}
           projects={projects}
-          crmMock={crmMock}
           onBack={() => setAdvisorSel(null)}
         />
       )}

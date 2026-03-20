@@ -4,49 +4,34 @@ function cleanSpaces(s) {
   return (s ?? "").toString().replace(/\s+/g, " ").trim();
 }
 
-export async function getProspects({ desde, advisorName, page = 1, records = 100 }) {
+
+export async function getProspects({
+  desde,
+  hasta,
+  advisorName,
+  project,
+  page = 1,
+  records = 20,
+}) {
   const url =
     `${BACKEND}/api/prospects` +
     `?createdDate=${encodeURIComponent(desde)}` +
+    `&untilDate=${encodeURIComponent(hasta || desde)}` +
+    `&advisor=${encodeURIComponent(advisorName || "")}` +
+    `&project=${encodeURIComponent(project || "")}` +
     `&page=${encodeURIComponent(page)}` +
-    `&records=${encodeURIComponent(records)}` +
-    `&advisor=${encodeURIComponent(advisorName)}`;
+    `&records=${encodeURIComponent(records)}`;
 
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
 
-  const list = Array.isArray(data?.records) ? data.records : [];
-
-  return list.map((r) => ({
-    prospectId: r.prospectId,
-    cliente: cleanSpaces(r.raw?.Nombre_del_Cliente || ""),
-    telefono: cleanSpaces(r.telefono),
-    probabilidad: r.probabilidad ?? "",
-    asesor: cleanSpaces(r.asesor),
-    proyectoNombre: cleanSpaces(r.proyectoNombre),
-    projectCode: r.projectCode,
-    enCRM: false,
-    raw: r.raw,
-  }));
+  return await res.json();
 }
 
-export async function getProspectEvents({ prospectId, projectCode }) {
-  const url =
-    `${BACKEND}/api/prospects/${encodeURIComponent(prospectId)}/events` +
-    `?projectCode=${encodeURIComponent(projectCode)}`;
 
+export async function getProspectEvents({ prospectId, projectCode }) {
+  const url = `${BACKEND}/api/prospects/${encodeURIComponent(prospectId)}/events-enriched?projectCode=${encodeURIComponent(projectCode)}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-
-  const events = Array.isArray(data?.events) ? data.events : [];
-
-  return events.map((e) => ({
-    fecha: e.date || e.startTime || "",
-    asesor: e.userId ? `User ${e.userId}` : "Sistema",
-    nota: cleanSpaces(e.content || ""),
-    accion: cleanSpaces(e.action || ""),
-    raw: e,
-  }));
+  return await res.json(); 
 }
